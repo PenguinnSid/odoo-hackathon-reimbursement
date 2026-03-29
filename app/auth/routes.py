@@ -1,14 +1,31 @@
-from flask import render_template, redirect, url_for
+from flask import jsonify, request
 from app.auth import auth_bp
+from app.store import ROLE_PROFILES
 
-@auth_bp.route('/login')
+@auth_bp.route('/login', methods=['POST'])
 def login():
-    return 'Auth Login Endpoint'
+    payload = request.get_json(silent=True) or {}
+    requested_role = str(payload.get('role') or 'employee').strip().lower()
+    role = requested_role if requested_role in ROLE_PROFILES else 'employee'
+    profile = ROLE_PROFILES[role]
 
-@auth_bp.route('/signup')
+    return jsonify(
+        {
+            'ok': True,
+            'user': {
+                'id': f'{role}-demo',
+                'role': role,
+                'name': profile['name'],
+                'email': profile['email'],
+                'avatar': profile['avatar'],
+            },
+        }
+    )
+
+@auth_bp.route('/signup', methods=['POST'])
 def signup():
-    return 'Auth Signup Endpoint'
+    return jsonify({'ok': True, 'message': 'Signup endpoint is ready for integration.'})
 
-@auth_bp.route('/logout')
+@auth_bp.route('/logout', methods=['POST'])
 def logout():
-    return 'Auth Logout Endpoint'
+    return jsonify({'ok': True})
