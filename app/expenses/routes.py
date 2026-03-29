@@ -1,7 +1,11 @@
 from datetime import datetime
 from flask import jsonify, request
+from werkzeug.utils import secure_filename
 from app.expenses import expenses_bp
 from app.store import STATE
+from app.ocr_utils import save_upload_file, process_receipt_image
+
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'}
 
 
 def _now_str():
@@ -229,3 +233,75 @@ def mark_notifications_read():
             notif['unread'] = False
 
     return jsonify({'ok': True})
+
+
+@expenses_bp.route('/receipts/upload', methods=['POST'])
+def upload_receipt():
+    """Upload and process receipt image with OCR"""
+    
+    # Check if file is present
+    if 'file' not in request.files:
+        return _payload_error('No file provided', status=400)
+    
+    file = request.files['file']
+    
+    if file.filename == '':
+        return _payload_error('No file selected', status=400)
+    
+    # Check file extension
+    filename = secure_filename(file.filename)
+    if not filename or '.' not in filename:
+        return _payload_error('Invalid filename', status=400)
+    
+    ext = filename.rsplit('.', 1)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return _payload_error(f'File type .{ext} not allowed. Allowed: {", ".join(ALLOWED_EXTENSIONS)}', status=400)
+    
+    # Save file
+    file_path = save_upload_file(file)
+    if not file_path:
+        return _payload_error('Failed to save file', status=500)
+    
+    # Process with OCR
+    ocr_result = process_receipt_image(file_path)
+    
+    # Add metadata
+    receipt = {
+        'id': int(datetime.now().timestamp() * 1000),
+        'file_path': file_path,
+        'file_type': ext,
+        'upload_time': _now_str(),
+        'status': ocr_result.get('status', 'done'),
+        'raw_text': ocr_result.get('raw_text'),
+        'parsed_amount': ocr_result.get('amount'),
+        'parsed_currency': ocr_result.get('currency'),
+        'parsed_description': ocr_result.get('description'),
+        'parsed_vendor': ocr_result.get('vendor'),
+        'parsed_date': ocr_result.get('date'),
+    }
+    
+    # Store receipt in state
+    if 'receipts' not in STATE:
+        STATE['receipts'] = []
+    STATE['receipts'].append(receipt)
+    
+    return jsonify({
+        'ok': True,
+        'receipt': receipt,
+        'message': 'Receipt processed successfully' if ocr_result.get('status') == 'done' else 'Receipt uploaded but OCR processing may have issues'
+    }), 201
+
+
+@expenses_bp.route('/receipts/<receipt_id>', methods=['GET'])
+def get_receipt(receipt_id):
+    """Get receipt details by ID"""
+    
+    if 'receipts' not in STATE:
+        STATE['receipts'] = []
+    
+    receipt_id = int(receipt_id)
+    for receipt in STATE['receipts']:
+        if receipt.get('id') == receipt_id:
+            return jsonify({'ok': True, 'receipt': receipt})
+    
+    return _payload_error('Receipt not found', status=404)

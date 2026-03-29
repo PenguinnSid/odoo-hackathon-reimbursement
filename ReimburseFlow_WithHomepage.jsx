@@ -766,6 +766,8 @@ function ReimburseFlowApp() {
   const [searchQuery,    setSearchQuery]    = useState('');
   const [statusFilter,   setStatusFilter]   = useState('');
   const [employeeFilter, setEmployeeFilter] = useState('');
+  const [ocrData,        setOcrData]        = useState(null);
+  const [uploadingReceipt, setUploadingReceipt] = useState(false);
 
   const toast = (msg, type='info') => {
     const id = Date.now();
@@ -934,6 +936,7 @@ function ReimburseFlowApp() {
 
       const id = data.claim?.id || 'Claim';
       setClaimModalOpen(false);
+      setOcrData(null);
       setClaimForm({ title:'', category:'', amount:'', date:new Date().toISOString().split('T')[0], desc:'', receipt:'' });
       await refreshData();
       toast(asDraft?'Saved as draft: '+id:'Claim '+id+' submitted successfully!',asDraft?'info':'success');
@@ -942,12 +945,46 @@ function ReimburseFlowApp() {
     }
   };
 
-  const handleFile = file => {
-    const allowed = ['application/pdf','image/png','image/jpeg','image/jpg'];
-    if (!allowed.includes(file.type)) { toast('Invalid file type. Use PDF, PNG, or JPG.','error'); return; }
+  const handleFile = async file => {
+    const allowed = ['image/png','image/jpeg','image/jpg','image/gif','image/bmp','image/tiff'];
+    if (!allowed.includes(file.type)) { toast('Invalid file type. Use PNG, JPG, GIF, BMP, or TIFF.','error'); return; }
     if (file.size>10*1024*1024) { toast('File too large. Max 10 MB.','error'); return; }
-    setClaimForm(f => ({ ...f, receipt:file.name }));
-    toast('Receipt uploaded & validated','success');
+
+    // Upload file for OCR processing
+    setUploadingReceipt(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const response = await fetch(`${window.__RF_API_BASE__ || 'http://127.0.0.1:5000'}/expenses/receipts/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(()=>({}));
+        throw new Error(errData.error || `Upload failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (!data.ok) throw new Error(data.error || 'Upload failed');
+
+      const receipt = data.receipt;
+      setOcrData(receipt);
+      setClaimForm(f => ({ ...f, receipt: receipt.id }));
+      
+      // Auto-fill form with OCR data if available
+      if (receipt.parsed_amount) setClaimForm(f => ({ ...f, amount: receipt.parsed_amount.toString() }));
+      if (receipt.parsed_date) setClaimForm(f => ({ ...f, date: receipt.parsed_date }));
+      if (receipt.parsed_description) setClaimForm(f => ({ ...f, desc: receipt.parsed_description }));
+      
+      toast('Receipt uploaded & OCR processed!','success');
+    } catch (err) {
+      toast(err.message || 'Failed to upload receipt', 'error');
+      setOcrData(null);
+    } finally {
+      setUploadingReceipt(false);
+    }
   };
 
   const myClaims = claims.filter(c => c.employeeId===session.id);
@@ -1090,9 +1127,9 @@ function ReimburseFlowApp() {
       </div>
 
       {/* CLAIM MODAL */}
-      <div className={`rf-modal-overlay ${claimModalOpen?'open':''}`} onClick={e=>{if(e.target===e.currentTarget)setClaimModalOpen(false);}}>
+      <div className={`rf-modal-overlay ${claimModalOpen?'open':''}`} onClick={e=>{if(e.target===e.currentTarget){setClaimModalOpen(false);setOcrData(null);}}}>
         <div className="rf-modal">
-          <div className="rf-modal-header"><div className="rf-modal-title">Submit New Expense Claim</div><button className="rf-modal-close" onClick={()=>setClaimModalOpen(false)}>×</button></div>
+          <div className="rf-modal-header"><div className="rf-modal-title">Submit New Expense Claim</div><button className="rf-modal-close" onClick={()=>{setClaimModalOpen(false);setOcrData(null);}}>×</button></div>
           <div className="rf-modal-body">
             <div className="rf-form-row">
               <div className="rf-form-field"><label>Expense Title</label><input type="text" placeholder="e.g. Client lunch at Taj" value={claimForm.title} onChange={e=>setClaimForm(f=>({...f,title:e.target.value}))}/></div>
@@ -1103,7 +1140,7 @@ function ReimburseFlowApp() {
               <div className="rf-form-field"><label>Expense Date</label><input type="date" value={claimForm.date} onChange={e=>setClaimForm(f=>({...f,date:e.target.value}))}/></div>
             </div>
             <div className="rf-form-field"><label>Description / Business Purpose</label><textarea placeholder="Describe the business purpose of this expense…" value={claimForm.desc} onChange={e=>setClaimForm(f=>({...f,desc:e.target.value}))}/></div>
-            <div className="rf-form-field"><label>Receipt Upload</label><UploadZone receipt={claimForm.receipt} onFile={handleFile}/></div>
+            <div className="rf-form-field"><label>Receipt Upload</label><UploadZone receipt={claimForm.receipt} onFile={handleFile} ocrData={ocrData} uploading={uploadingReceipt}/></div>
           </div>
           <div className="rf-modal-footer">
             <button className="rf-btn rf-btn-ghost" onClick={()=>submitClaim(true)}>Save as Draft</button>
@@ -1149,10 +1186,32 @@ function StatsGrid({ stats }) {
   return (<div className="rf-stats-grid">{stats.map((s,i)=>(<div key={i} className="rf-stat-card"><div className="rf-stat-label">{s.label}</div><div className="rf-stat-value">{s.value}</div><div className="rf-stat-sub">{s.sub}</div>{s.change&&<div className={`rf-stat-change ${s.dir}`}>{s.change}</div>}</div>))}</div>);
 }
 
-function UploadZone({ receipt, onFile }) {
+function UploadZone({ receipt, onFile, ocrData, uploading }) {
   const [drag, setDrag] = useState(false);
   const inputRef = useRef();
-  return (<><div className={`rf-upload-zone ${drag?'drag-over':''}`} onClick={()=>inputRef.current.click()} onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);if(e.dataTransfer.files[0])onFile(e.dataTransfer.files[0]);}}><div className="rf-upload-icon">📎</div><p>Click to upload or drag & drop</p><p className="rf-upload-hint">PDF, PNG, JPG — max 10 MB · File type validated server-side</p></div><input ref={inputRef} type="file" style={{display:'none'}} accept=".pdf,.png,.jpg,.jpeg" onChange={e=>{if(e.target.files[0])onFile(e.target.files[0]);}}/>{receipt&&<div className="rf-file-chip">📎 {receipt} <span style={{color:'var(--green)'}}>✓ Validated</span></div>}</>);
+  
+  if (ocrData) {
+    return (<div><div style={{background:'var(--blue-bg)',border:'1px solid rgba(108,143,255,0.2)',borderRadius:'8px',padding:'14px',marginBottom:'12px'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'10px'}}><strong style={{color:'var(--text)'}}>✓ Receipt processed with OCR</strong></div>
+      <table style={{width:'100%',fontSize:'12px'}}>
+        <tbody>
+          <tr><td style={{padding:'4px 0',color:'var(--text2)'}}>Amount:</td><td style={{fontWeight:500,color:'var(--text)'}}>{ocrData.parsed_amount?`${ocrData.parsed_currency||'USD'} ${ocrData.parsed_amount}`:'-'}</td></tr>
+          {ocrData.parsed_date&&<tr><td style={{padding:'4px 0',color:'var(--text2)'}}>Date:</td><td style={{fontWeight:500,color:'var(--text)'}}>{ocrData.parsed_date}</td></tr>}
+          {ocrData.parsed_vendor&&<tr><td style={{padding:'4px 0',color:'var(--text2)'}}>Vendor:</td><td style={{fontWeight:500,color:'var(--text)'}}>{ocrData.parsed_vendor}</td></tr>}
+          <tr><td style={{padding:'4px 0',color:'var(--text2)'}}>Status:</td><td style={{fontWeight:500,color:'var(--green)'}}>{ocrData.status}</td></tr>
+        </tbody>
+      </table>
+      {ocrData.raw_text&&<div style={{marginTop:'10px',fontSize:'11px',color:'var(--text3)',maxHeight:'100px',overflow:'auto',background:'var(--bg2)',padding:'8px',borderRadius:'4px'}}><em>«{ocrData.raw_text}...»</em></div>}
+    </div></div>);
+  }
+
+  return (<><div className={`rf-upload-zone ${drag?'drag-over':''} ${uploading?'drag-over':''}`} onClick={()=>!uploading&&inputRef.current.click()} onDragOver={e=>{e.preventDefault();!uploading&&setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);if(e.dataTransfer.files[0]&&!uploading)onFile(e.dataTransfer.files[0]);}}>
+    <div className="rf-upload-icon">{uploading?'⏳':'📎'}</div>
+    <p>{uploading?'Processing with OCR...':'Click to upload or drag & drop'}</p>
+    <p className="rf-upload-hint">{uploading?'Please wait...':'PNG, JPG, GIF, BMP, TIFF — max 10 MB · OCR processes automatically'}</p>
+  </div>
+  <input ref={inputRef} type="file" style={{display:'none'}} accept="image/*" onChange={e=>{if(e.target.files[0])onFile(e.target.files[0]);}} disabled={uploading}/>
+  </>);
 }
 
 /* ════════════════════════════════════════════════
